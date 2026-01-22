@@ -63,4 +63,5 @@ if __name__ == "__main__":
     connection = connect_to_mail()
     if connection:
         connection.logout()
-        print("🔒 Sesja zakończona bezpiecznie.")
+        print("🔒 Sesja zakończona bezpiecznie..")
+
