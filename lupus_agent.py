@@ -1,67 +1,72 @@
 import os
-import imaplib
-import email
-from email.header import decode_header
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+import pickle
 import telebot
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 
-# --- KONFIGURACJA (POBIERANIE Z SEJFU) ---
-EMAIL = "andrzej.skrucha@gmail.com"
-# Zmieniamy GMAIL_PASS na Twoją nazwę z Bash:
-PASSWORD = os.environ.get('LUPUS_PwD')
-SERVER = "imap.gmail.com"
+# Dane z Twojego "sejfu" (.bashrc)
+TOKEN = os.getenv('TELEGRAM_TOKEN')
+CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+bot = telebot.TeleBot(TOKEN)
 
-# Dane Telegrama (nazwy są zgodne z Twoim grepem)
-TOKEN = os.environ.get('TELEGRAM_TOKEN')
-CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-# Twoja lista dostawców
-DOSTWCY = ["nju", "nest", "e.on", "pge", "pgnig", "plus"]
+# Zakres dostępu do Gmaila
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
-def connect_to_mail():
+def get_gmail_service():
+    creds = None
+    # Plik token.pickle przechowuje dostęp po pierwszej autoryzacji
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            # KONFIGURACJA POD SERWER:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json',
+                SCOPES,
+                redirect_uri='https://localhost' # To pozwoli nam wyciągnąć kod z paska adresu
+            )
+            auth_url, _ = flow.authorization_url(prompt='consent')
+
+            print("-" * 50)
+            print(f'1. Otwórz ten link w przeglądarce:\n{auth_url}')
+            print("-" * 50)
+            print('2. Zaloguj się i zaakceptuj uprawnienia.')
+            print('3. Zostaniesz przekierowany na stronę błędu (localhost).')
+            print('4. SKOPIUJ całe "code=..." z paska adresu przeglądarki.')
+            print("-" * 50)
+
+            code = input('Wklej tutaj skopiowany kod (wszystko po code=): ')
+            flow.fetch_token(code=code)
+            creds = flow.credentials
+
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+
+    return build('gmail', 'v1', credentials=creds)
+
+def main():
     try:
-        # Sprawdzamy czy pobrano dane z Sejfu
-        if not EMAIL or not PASSWORD:
-            print("❌ Błąd: Nie znaleziono danych logowania w Sejfu (GMAIL_USER/GMAIL_PASS)")
-            return None
+        service = get_gmail_service()
+        # Szukamy maili od nju mobile
+        results = service.users().messages().list(userId='me', q='from:nju@njumobile.pl').execute()
+        messages = results.get('messages', [])
 
-        mail = imaplib.IMAP4_SSL(SERVER)
-        mail.login(EMAIL, PASSWORD)
-        print("✅ Lupus połączony i skanuje skrzynkę...")
+        if not messages:
+            bot.send_message(CHAT_ID, "🛡️ Lupus: Sprawdziłem pocztę. Brak nowych faktur od nju.")
+        else:
+            bot.send_message(CHAT_ID, f"🛡️ Lupus: Znaleziono {len(messages)} wiadomości od nju!")
 
-        mail.select("inbox")
-        status, messages = mail.search(None, 'UNSEEN')
-
-        for num in messages[0].split():
-            res, msg = mail.fetch(num, "(RFC822)")
-            for response in msg:
-                if isinstance(response, tuple):
-                    msg_obj = email.message_from_bytes(response[1])
-
-                    # Odczytujemy temat
-                    subject_data = decode_header(msg_obj["Subject"])[0]
-                    subject = subject_data[0]
-                    if isinstance(subject, bytes):
-                        subject = subject.decode(subject_data[1] or 'utf-8')
-
-                    # Sprawdzamy czy pasuje do listy
-                    if any(d in subject.lower() for d in DOSTWCY):
-                        TOKEN = os.environ.get('TELEGRAM_TOKEN')
-                        CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
-
-                        if TOKEN and CHAT_ID:
-                            bot = telebot.TeleBot(TOKEN)
-                            bot.send_message(CHAT_ID, f"🏦 Lupus znalazł: {subject}")
-                            print(f"🚀 Wysłano powiadomienie o: {subject}")
-                        else:
-                            print("❌ Błąd: Brak TELEGRAM_TOKEN lub TELEGRAM_CHAT_ID w Sejfu")
-
-        return mail
     except Exception as e:
-        print(f"❌ Błąd: {e}")
-        return None
+        # Jeśli CHAT_ID jest poprawne, błąd dostaniesz na Telegram
+        print(f"Błąd: {e}")
+        bot.send_message(CHAT_ID, f"❌ Lupus błąd: {str(e)}")
 
 if __name__ == "__main__":
-    connection = connect_to_mail()
-    if connection:
-        connection.logout()
-        print("🔒 Sesja zakończona bezpiecznie..")
-
+    main()
